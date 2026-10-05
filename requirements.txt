@@ -1,0 +1,4 @@
+streamlit
+mne
+scipy
+numpy
