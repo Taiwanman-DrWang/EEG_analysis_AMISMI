@@ -23,7 +23,7 @@ class StateSpaceKalmanFilter:
         self.P = (1 - K) * P_pred
         return self.x_est
 
-def analyze_eeg_dynamics(edf_path, channel_name='EEG Fp1', fs_target=250):
+def analyze_eeg_dynamics(edf_path, channel_name='EEG L1(Fp1)', fs_target=250):
     """讀取 EDF 並同時計算 AMI 與 SMI"""
     mne.set_log_level('WARNING')
     raw = mne.io.read_raw_edf(edf_path, preload=True)
