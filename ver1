@@ -1,0 +1,87 @@
+import numpy as np
+import scipy.signal as signal
+import mne
+
+class StateSpaceKalmanFilter:
+    """一維高斯卡爾曼濾波器 (依據 Adam et al., 2023 參數)"""
+    def __init__(self, sigma_v=0.0209, sigma_eps=1.0):
+        self.sigma_v2 = sigma_v ** 2
+        self.sigma_eps2 = sigma_eps ** 2
+        self.x_est = 0.0
+        self.P = 1.0 # 初始變異數估計
+        self.dt2 = 1.0 # 假設已歸一化步長
+
+    def update(self, y):
+        # Prediction
+        x_pred = self.x_est
+        P_pred = self.P + self.dt2 * self.sigma_v2
+        # Kalman Gain
+        K = P_pred / (P_pred + self.sigma_eps2)
+        # Update
+        self.x_est = x_pred + K * (y - x_pred)
+        self.P = (1 - K) * P_pred
+        return self.x_est
+
+def calculate_ami(edf_path, channel_name='EEG Fp1', fs_target=250):
+    """讀取 EDF 並計算 AMI (Alpha Modulation Index)"""
+    # 1. 讀取 EDF 資料
+    raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
+    raw.pick_channels([channel_name])
+    if raw.info['sfreq'] != fs_target:
+        raw.resample(fs_target)
+    
+    data = raw.get_data()[0]
+    fs = fs_target
+    
+    # 2. 頻段濾波 (Alpha 8-14 Hz)
+    b, a = signal.butter(2, [8 / (fs/2), 14 / (fs/2)], btype='bandpass')
+    alpha_signal = signal.filtfilt(b, a, data)
+    abs_alpha = np.abs(alpha_signal)
+    
+    # 3. 校準視窗與閾值判定 (假設前 300 秒為校準期)
+    calib_samples = min(300 * fs, len(abs_alpha))
+    peaks, _ = signal.find_peaks(abs_alpha[:calib_samples])
+    M_threshold = np.percentile(abs_alpha[peaks], 50)
+    
+    # 4. 狀態判定 (Up-state / Down-state)
+    all_peaks, _ = signal.find_peaks(abs_alpha)
+    valid_peaks = all_peaks[abs_alpha[all_peaks] > M_threshold]
+    
+    # 建立布林陣列標記 Up-state (波峰前後 50ms)
+    window_samples = int(0.05 * fs)
+    is_up_state = np.zeros_like(abs_alpha, dtype=bool)
+    for p in valid_peaks:
+        start = max(0, p - window_samples)
+        end = min(len(abs_alpha), p + window_samples)
+        is_up_state[start:end] = True
+        
+    # 5. 計算持續時間序列 (此處以簡化邏輯計算瞬時時長，實務上可用迴圈計算區段時長)
+    # 為適應連續訊號輸入，轉換為每秒更新的觀察值
+    sec_num = len(abs_alpha) // fs
+    y_dup = np.zeros(sec_num)
+    y_ddown = np.zeros(sec_num)
+    
+    for i in range(sec_num):
+        segment = is_up_state[i*fs : (i+1)*fs]
+        up_ratio = np.sum(segment) / fs
+        y_dup[i] = up_ratio * 1.0 # 該秒內 up-state 比例作為瞬時觀察值
+        y_ddown[i] = 1.0 - y_dup[i]
+        
+    # 6. 卡爾曼濾波平滑化與 AMI 計算
+    kf_up = StateSpaceKalmanFilter(sigma_v=0.0209, sigma_eps=1.0)
+    kf_down = StateSpaceKalmanFilter(sigma_v=0.0209, sigma_eps=1.0)
+    
+    ami_series = np.zeros(sec_num)
+    gamma_param = 0.5
+    
+    for i in range(sec_num):
+        sm_up = kf_up.update(y_dup[i])
+        sm_down = kf_down.update(y_ddown[i])
+        
+        # 避免分母為零
+        sm_up = max(sm_up, 1e-6)
+        sm_down = max(sm_down, 1e-6)
+        
+        ami_series[i] = (sm_up**gamma_param) / ((sm_up**gamma_param) + (sm_down**gamma_param))
+        
+    return ami_series
